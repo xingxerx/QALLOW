@@ -1,12 +1,33 @@
-/target/
-/dayroom0/
-/.venv/
+# Rust (workspace root and nested crates)
+target/
+**/*.rs.bk
 
-
+# C build output (Makefile build/, MSVC objects, local test binaries)
 build/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.o
+*.a
 
-# Runtime artifacts
+# Runtime state: LMDB stores, logs, per-run config. Never committed;
+# the store is recreated by ql_persist_open() / qallow ingest.
+*.lmdb
+*.lmdb-lock
+data.mdb
+lock.mdb
 /data/logs/
 qallow.log
 qallow_state.json
 qallow_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+/.venv/
+
+# Local scratch
+/dayroom0/
+.DS_Store
+Thumbs.db

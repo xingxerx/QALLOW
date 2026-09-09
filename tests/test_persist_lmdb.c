@@ -6,6 +6,7 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h> /* GetCurrentProcessId */
 #define TEST_MKDIR(path) _mkdir(path)
 #else
 #include <sys/stat.h>

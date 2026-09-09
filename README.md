@@ -178,6 +178,43 @@ QALLOW_CONTEXT_INJECT=true   # inject state prefix into LLM prompts
 
 ---
 
+## CLI: state in, state out
+
+`qallow_cli` is the C engine's command-line host and the ecosystem's
+persistence seam:
+
+| Command | Role |
+|---|---|
+| `qallow run --phase=N` / `qallow run unified` | Run the C phase engines |
+| `qallow ingest <store> <frames.qsw>` | Merge QSW frames from DUCTEI into LMDB via `ql_persist_merge_blob()` (reject-before-write) |
+| `qallow get <store> <key>` | Read a value back out of LMDB |
+| `qallow propose <store> <key> <spool>` | Mind-to-hands: if `<key>` is a persisted `veyn.rem_event` cue with value 1.0, write an offline LIMEN route request into limend's `spool/pending/`. Idempotent by job id; refuses unpersisted keys; never carries credentials. |
+
+`propose` only ever acts on durable state: a cue that has not been merged
+into LMDB cannot become a job. The full loop (VEYN -> DUCTEI -> LMDB ->
+propose -> limend -> DUCTEI -> LMDB) is replayed by DUCTEI's
+`scripts/smoke_loop.py`.
+
+### Mesh sync wire (proto v1 and v2)
+
+`sync_wire.c` is the conformance oracle for DUCTEI's Rust codec. It
+speaks two envelope formats, never mixed within a stream:
+
+- **v1** (`QSW_PROTO_VER`): scopes ride a comma-joined key-prefix shim
+  (`"scope0,scope1|key"`).
+- **v2** (`QSW_PROTO_VER_V2`): scopes are a length-prefixed native wire
+  field, so a comma inside a scope name survives. `qsw_decode_v2` mirrors
+  DUCTEI's `ductei_qallow::v2` byte for byte.
+
+`qallow ingest` negotiates the version (HELLO `proto_ver`, or v1-then-v2
+fallback for ENVELOPE-only frame files) and rebuilds the v1 shim key
+before merging, so a record lands under the same LMDB key regardless of
+which proto version carried it. Both versions pass the conformance
+oracle in CI; the invariants (deny-listed key prefixes, bounded session
+payloads, persistence before ack) are enforced identically. Details:
+ATRIUM `harness-roadmap/05-qsw-v2-c-decoder.md`.
+
+
 ## API
 
 The FastAPI server exposes Qallow's full runtime over HTTP:

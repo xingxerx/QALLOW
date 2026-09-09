@@ -6,6 +6,8 @@
 //!   qallow run --phase=N [--ticks=T]   (N in 1..=4)
 //!   qallow run unified [--ticks=T]
 //!   qallow ingest <store_dir> <frame_file>
+//!   qallow get <store_dir> <key>
+//!   qallow propose <store_dir> <key> <spool_dir> [--fidelity=F] [--budget=B]
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_float, c_int};
@@ -32,6 +34,7 @@ extern "C" {
 }
 
 mod ingest;
+mod propose;
 
 const DEFAULT_TICKS: i32 = 1000;
 const DEFAULT_EPS: f32 = 0.1;
@@ -39,7 +42,8 @@ const DEFAULT_POCKETS: i32 = 32; // C engine caps at QALLOW_PHASE2_MAX_POCKETS =
 const DEFAULT_COUPLING: f32 = 0.5;
 
 fn usage() -> String {
-    "Usage:\n  qallow run --phase=N [--ticks=T]   (N in 1..4)\n  qallow run unified [--ticks=T]\n  qallow ingest <store_dir> <frame_file>\n  qallow get <store_dir> <key>"
+    "Usage:\n  qallow run --phase=N [--ticks=T]   (N in 1..4)\n  qallow run unified [--ticks=T]\n  qallow ingest <store_dir> <frame_file>\n  qallow get <store_dir> <key>
+  qallow propose <store_dir> <key> <spool_dir> [--fidelity=F] [--budget=B]"
         .to_string()
 }
 
@@ -100,6 +104,27 @@ fn real_main() -> Result<(), String> {
             return Err(format!("Usage: qallow get <store_dir> <key>\n{}", usage()));
         }
         return ingest::run_get(&args[1], &args[2]);
+    }
+    if args[0] == "propose" {
+        if args.len() < 4 {
+            return Err(format!(
+                "Usage: qallow propose <store_dir> <key> <spool_dir> [--fidelity=F] [--budget=B]\n{}",
+                usage()
+            ));
+        }
+        let mut fidelity = propose::DEFAULT_FIDELITY_TARGET;
+        let mut budget = propose::DEFAULT_CREDIT_BUDGET;
+        for arg in &args[4..] {
+            if let Some(v) = arg.strip_prefix("--fidelity=") {
+                fidelity = v.parse().map_err(|_| format!("Invalid fidelity: {}", v))?;
+            } else if let Some(v) = arg.strip_prefix("--budget=") {
+                budget = v.parse().map_err(|_| format!("Invalid budget: {}", v))?;
+            } else {
+                return Err(format!("Unknown argument: {}
+{}", arg, usage()));
+            }
+        }
+        return propose::run(&args[1], &args[2], &args[3], fidelity, budget);
     }
     if args[0] != "run" {
         return Err(format!("Unknown command: {}\n{}", args[0], usage()));
