@@ -94,6 +94,25 @@ int main(void) {
     assert(ql_persist_merge_blob(store, &e5, &applied) == QLP_OK && applied);
     assert(ql_persist_get(store, "k1", 2, buf, sizeof buf, &len) == QLP_E_IO);
 
+    /* tombstone is retained: a delayed older write (another peer's
+     * lamport 4 arriving after the lamport 6 delete) must not resurrect */
+    {
+        uint8_t *bz = NULL; uint32_t blz = 0;
+        qsw_envelope late = mk2(idA, 4, "k1", "zombie", 0, &bz, &blz);
+        assert(ql_persist_merge_blob(store, &late, &applied) == QLP_OK && !applied);
+        assert(ql_persist_get(store, "k1", 2, buf, sizeof buf, &len) == QLP_E_IO);
+        free(bz);
+    }
+    /* a newer write after the tombstone does win */
+    {
+        uint8_t *bz = NULL; uint32_t blz = 0;
+        qsw_envelope back = mk2(idA, 7, "k1", "back", 0, &bz, &blz);
+        assert(ql_persist_merge_blob(store, &back, &applied) == QLP_OK && applied);
+        assert(ql_persist_get(store, "k1", 2, buf, sizeof buf, &len) == QLP_OK);
+        assert(len == 4 && !memcmp(buf, "back", 4));
+        free(bz);
+    }
+
     /* fresh key */
     qsw_envelope e6 = mk2(idA, 1, "k2", "hello", 0, &b6, &bl6);
     int rc_e6 = ql_persist_merge_blob(store, &e6, &applied);
@@ -156,6 +175,6 @@ int main(void) {
 
     ql_persist_close(store);
     free(b1); free(b2); free(b3); free(b4); free(b5); free(b6);
-    puts("persist_lmdb: all tests passed (LWW merge, tie-break, tombstone, get)");
+    puts("persist_lmdb: all tests passed (LWW merge, tie-break, tombstone, tombstone retention, get)");
     return 0;
 }

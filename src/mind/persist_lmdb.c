@@ -165,14 +165,15 @@ qlp_status ql_persist_merge_blob(ql_persist_store *store,
         return QLP_E_IO;
     }
 
+    /* A winning tombstone is kept as a header-only record (flags 0x1, no
+     * data) instead of being deleted. Deleting it would forget the
+     * (lamport, node_id) that won, and a delayed older write arriving
+     * later from another peer would resurrect the key. ql_persist_get
+     * already reports a tombstoned key as absent. */
+    if (tombstone) user_len = 0;
+
     int put_rc;
-    if (tombstone) {
-        put_rc = mdb_del(txn, dbi, &k, NULL);
-        if (put_rc != 0 && put_rc != MDB_NOTFOUND) {
-            mdb_txn_abort(txn);
-            return QLP_E_IO;
-        }
-    } else {
+    {
         size_t rec_len = QLP_REC_HDR_LEN + user_len;
         uint8_t *rec = (uint8_t *)malloc(rec_len);
         if (!rec) {

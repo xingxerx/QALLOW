@@ -135,7 +135,7 @@ fn main() {
         process_manager.clone(),
         Arc::new(logger.clone()),
         codebase_mgr.clone(),
-        Some(sender.clone()),
+        Some(sender),
     ));
 
     // --- Main Window and UI Setup ---
@@ -171,10 +171,8 @@ fn main() {
     // `app.wait()` will block here until the window is closed.
     while app.wait() {
         // Handle messages from background threads
-        if let Some(msg) = receiver.recv() {
-            match msg {
-                _ => {}
-            }
+        if let Some(_msg) = receiver.recv() {
+            {}
         }
 
         // Update UI elements that need periodic refresh

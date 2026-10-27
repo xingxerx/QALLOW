@@ -387,8 +387,8 @@ fn ingest_frames(store: *mut QlPersistStore, frame_file: &str) -> Result<(), Str
                 return Err(format!("decoder made no progress at byte offset {offset}"));
             }
 
-            if frame.frame_type == QSW_F_HELLO || frame.frame_type == QSW_F_HELLO_ACK {
-                if unsafe { frame.u.hello.proto_ver } == 2 {
+            if (frame.frame_type == QSW_F_HELLO || frame.frame_type == QSW_F_HELLO_ACK)
+                && unsafe { frame.u.hello.proto_ver } == 2 {
                     // Declared v2 handshake: restart the stream under
                     // the v2 decoder. Nothing merges on HELLO frames,
                     // so restarting from 0 is safe.
@@ -397,7 +397,6 @@ fn ingest_frames(store: *mut QlPersistStore, frame_file: &str) -> Result<(), Str
                     offset = 0;
                     continue;
                 }
-            }
 
             if frame.frame_type == QSW_F_ENVELOPE {
                 unsafe { merge_v1(store, offset, frame.u.env)? };

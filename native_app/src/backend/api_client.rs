@@ -19,7 +19,7 @@ impl ApiClient {
 
     pub async fn get_metrics(&self) -> Result<serde_json::Value, String> {
         let res = self.client
-            .get(&format!("{}/metrics", self.base_url))
+            .get(format!("{}/metrics", self.base_url))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -29,7 +29,7 @@ impl ApiClient {
 
     pub async fn get_audit_logs(&self) -> Result<Vec<serde_json::Value>, String> {
         let res = self.client
-            .get(&format!("{}/logs", self.base_url))
+            .get(format!("{}/logs", self.base_url))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -39,7 +39,7 @@ impl ApiClient {
 
     pub async fn start_phase(&self, phase: u32, ticks: u32) -> Result<(), String> {
         self.client
-            .post(&format!("{}/phase/{}/start", self.base_url, phase))
+            .post(format!("{}/phase/{}/start", self.base_url, phase))
             .json(&json!({ "ticks": ticks }))
             .send()
             .await
@@ -49,7 +49,7 @@ impl ApiClient {
 
     pub async fn stop_phase(&self) -> Result<(), String> {
         self.client
-            .post(&format!("{}/phase/stop", self.base_url))
+            .post(format!("{}/phase/stop", self.base_url))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -58,7 +58,7 @@ impl ApiClient {
 
     pub async fn export_metrics(&self, format: &str) -> Result<String, String> {
         let res = self.client
-            .get(&format!("{}/export?format={}", self.base_url, format))
+            .get(format!("{}/export?format={}", self.base_url, format))
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -72,7 +72,7 @@ impl ApiClient {
         };
 
         let res = self.client
-            .post(&format!("{}/chat", self.base_url))
+            .post(format!("{}/chat", self.base_url))
             .json(&request)
             .send()
             .await?;
