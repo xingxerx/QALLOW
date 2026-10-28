@@ -154,8 +154,73 @@ int main(void) {
         free(b);
     }
 
+    /* --- Task 5: merge-key parity + kill-and-restart ---------------
+     * A v2 envelope is merged under the v1 shim key rebuilt by
+     * qsw_v2_merge_key. Closing and reopening the store (the Qallow
+     * stand-in for the smoke suite's kill-and-restart) must still
+     * find the record, and a later v2 ingest of the same scopes+key
+     * must land on that same LMDB key. */
+    {
+        const char *sc0 = "veyn,x"; /* unsorted; comma is the v1 trap */
+        const char *sc1 = "qallow.semantic.cert";
+        qsw_envelope_v2 e2 = {0};
+        memcpy(e2.node_id, idA, QSW_NODE_ID_LEN);
+        e2.lamport = 20; e2.schema_ver = 2;
+        e2.scope_count = 2;
+        e2.scopes[0].len = (uint16_t)strlen(sc0); e2.scopes[0].data = sc0;
+        e2.scopes[1].len = (uint16_t)strlen(sc1); e2.scopes[1].data = sc1;
+        e2.key = "limen.cert.j1"; e2.key_len = 13;
+
+        uint8_t shim[QSW_MAX_KEY_LEN];
+        int32_t slen = qsw_v2_merge_key(&e2, shim, sizeof shim);
+        static const char want_key[] =
+            "qallow.semantic.cert,veyn,x|limen.cert.j1";
+        assert(slen == (int32_t)(sizeof want_key - 1));
+        assert(!memcmp(shim, want_key, (size_t)slen));
+
+        uint8_t *bv1 = NULL; uint32_t blv1 = 0;
+        qsw_envelope ev1 = mk2(idA, 20, "unused", "from-v1", 0, &bv1, &blv1);
+        ev1.key = shim; ev1.key_len = (uint32_t)slen;
+        assert(ql_persist_merge_blob(store, &ev1, &applied) == QLP_OK && applied);
+        assert(ql_persist_get(store, shim, (uint32_t)slen,
+                              buf, sizeof buf, &len) == QLP_OK);
+        assert(len == 7 && !memcmp(buf, "from-v1", 7));
+
+        /* kill-and-restart: close the env, reopen the same dir. */
+        ql_persist_close(store);
+        store = NULL;
+        assert(ql_persist_open(dir, &store) == QLP_OK);
+        assert(ql_persist_get(store, shim, (uint32_t)slen,
+                              buf, sizeof buf, &len) == QLP_OK);
+        assert(len == 7 && !memcmp(buf, "from-v1", 7));
+
+        /* v2 ingest path: same reconstructed shim, later lamport. */
+        uint8_t *bv2 = NULL; uint32_t blv2 = 0;
+        qsw_envelope ev2 = mk2(idB, 21, "unused", "from-v2", 0, &bv2, &blv2);
+        ev2.key = shim; ev2.key_len = (uint32_t)slen;
+        assert(ql_persist_merge_blob(store, &ev2, &applied) == QLP_OK && applied);
+        assert(ql_persist_get(store, shim, (uint32_t)slen,
+                              buf, sizeof buf, &len) == QLP_OK);
+        assert(len == 7 && !memcmp(buf, "from-v2", 7));
+
+        /* malformed blob still rejected before write (same key). */
+        {
+            qsw_envelope bad = ev2;
+            const char *raw = "raw";
+            bad.lamport = 22;
+            bad.blob = raw; bad.blob_len = 3;
+            assert(ql_persist_merge_blob(store, &bad, &applied) == QLP_E_ARG);
+            assert(ql_persist_get(store, shim, (uint32_t)slen,
+                                  buf, sizeof buf, &len) == QLP_OK);
+            assert(len == 7 && !memcmp(buf, "from-v2", 7));
+        }
+
+        free(bv1); free(bv2);
+    }
+
     ql_persist_close(store);
     free(b1); free(b2); free(b3); free(b4); free(b5); free(b6);
-    puts("persist_lmdb: all tests passed (LWW merge, tie-break, tombstone, get)");
+    puts("persist_lmdb: all tests passed (LWW merge, tie-break, tombstone, "
+         "get, v2 merge-key parity, kill-and-restart)");
     return 0;
 }

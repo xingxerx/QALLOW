@@ -78,6 +78,42 @@ static uint32_t get32le(const uint8_t *p) {
            (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
+/* v1 byte-oracle lock: a known HELLO and ENVELOPE must keep producing
+ * the same on-wire bytes. Task 5 may not change v1. */
+static void v1_golden_bytes(const uint8_t id[QSW_NODE_ID_LEN]) {
+    uint8_t hello[64];
+    int32_t hn = qsw_encode_hello(hello, sizeof hello, QSW_F_HELLO, id, 7);
+    assert(hn == 37);
+    static const uint8_t want_hello[37] = {
+        0x01,
+        0x20, 0x00, 0x00, 0x00,
+        0x51, 0x53, 0x59, 0x4E, /* QSW_MAGIC "QSYN" LE */
+        0x01, 0x00,             /* proto_ver 1 */
+        0x00, 0x00,             /* caps */
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    assert(!memcmp(hello, want_hello, sizeof want_hello));
+
+    uint8_t env[64];
+    int32_t en = enc_env(env, sizeof env, id, 8, "k", "v");
+    assert(en == 43);
+    static const uint8_t want_env[43] = {
+        0x03,
+        0x26, 0x00, 0x00, 0x00,
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00,             /* schema_ver 1 */
+        0x00, 0x00,             /* flags */
+        0x01, 0x00, 0x00, 0x00, /* key_len */
+        0x01, 0x00, 0x00, 0x00, /* blob_len */
+        'k', 'v'
+    };
+    assert(!memcmp(env, want_env, sizeof want_env));
+}
+
 /* v2 negative + handshake tests (Task 5). buf2/w2 is a valid encoded
  * v2 ENVELOPE frame to mutate. */
 static void v2_negative_tests(const uint8_t id[QSW_NODE_ID_LEN],
@@ -133,10 +169,12 @@ static void v2_negative_tests(const uint8_t id[QSW_NODE_ID_LEN],
         qsw_envelope_v2 bad = {0};
         bad.scope_count = QSW_MAX_SCOPES + 1;
         assert(qsw_encode_envelope_v2(out, sizeof out, &bad) == QSW_E_ARG);
+        assert(qsw_v2_merge_key(&bad, out, sizeof out) == QSW_E_ARG);
         bad.scope_count = 1;
         bad.scopes[0].len = QSW_MAX_SCOPE_LEN + 1;
         bad.scopes[0].data = "x";
         assert(qsw_encode_envelope_v2(out, sizeof out, &bad) == QSW_E_ARG);
+        assert(qsw_v2_merge_key(&bad, out, sizeof out) == QSW_E_ARG);
     }
 
     /* full v2 stream: HELLO, ENVELOPE, BATCH_END, BYE, drip-fed */
@@ -174,6 +212,7 @@ int main(void) {
     uint8_t idA[QSW_NODE_ID_LEN], idB[QSW_NODE_ID_LEN];
     memset(idA, 0xAA, sizeof idA);
     memset(idB, 0xBB, sizeof idB);
+    v1_golden_bytes(idA);
     store A = {0}, B = {0};
     A.clock = 7; B.clock = 3;
 
@@ -327,29 +366,40 @@ int main(void) {
 
         /* Merge-key parity: v2 ingest rebuilds the v1 shim key
          * (scopes sorted, joined ",", then "|" + key) so the LMDB key
-         * is identical regardless of proto version. */
+         * is identical regardless of proto version. The C oracle
+         * (qsw_v2_merge_key) is what ingest.rs calls. */
         {
-            char shim[QSW_MAX_SCOPES * QSW_MAX_SCOPE_LEN + 8];
-            size_t o = 0;
-            for (int i = 0; i < 3; i++) {
-                if (i) shim[o++] = ',';
-                memcpy(shim + o, f2.u.env.scopes[i].data,
-                       f2.u.env.scopes[i].len);
-                o += f2.u.env.scopes[i].len;
-            }
-            shim[o++] = '|';
-            memcpy(shim + o, f2.u.env.key, f2.u.env.key_len);
-            o += f2.u.env.key_len;
-            shim[o] = 0;
-            assert(!strcmp(shim,
-                           "qallow.semantic.cert,veyn,x,veyn.sensor.eeg|k"));
+            uint8_t shim[QSW_MAX_KEY_LEN];
+            int32_t slen = qsw_v2_merge_key(&f2.u.env, shim, sizeof shim);
+            static const char want[] =
+                "qallow.semantic.cert,veyn,x,veyn.sensor.eeg|k";
+            assert(slen == (int32_t)(sizeof want - 1));
+            assert(!memcmp(shim, want, (size_t)slen));
+        }
+        /* Unsorted input still yields the v1 shim (oracle re-sorts). */
+        {
+            uint8_t shim[QSW_MAX_KEY_LEN];
+            int32_t slen = qsw_v2_merge_key(&e2, shim, sizeof shim);
+            static const char want[] =
+                "qallow.semantic.cert,veyn,x,veyn.sensor.eeg|k";
+            assert(slen == (int32_t)(sizeof want - 1));
+            assert(!memcmp(shim, want, (size_t)slen));
+        }
+        /* Empty scope list: v1 format!("{}|{}", "", key) -> "|k". */
+        {
+            qsw_envelope_v2 empty = e2;
+            empty.scope_count = 0;
+            uint8_t shim[QSW_MAX_KEY_LEN];
+            int32_t slen = qsw_v2_merge_key(&empty, shim, sizeof shim);
+            assert(slen == 2 && shim[0] == '|' && shim[1] == 'k');
         }
 
         /* --- v2 part 2: hello separation, malformed, full stream --- */
         v2_negative_tests(idA, buf2, (size_t)w2);
     }
 
-    puts("sync_wire: all tests passed (handshake, drip-feed decode, "
-         "LWW merge, malformed rejection, v2 multi-scope roundtrip)");
+    puts("sync_wire: all tests passed (v1 golden bytes, handshake, "
+         "drip-feed decode, LWW merge, malformed rejection, "
+         "v2 multi-scope roundtrip, merge-key parity)");
     return 0;
 }

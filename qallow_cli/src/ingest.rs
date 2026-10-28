@@ -122,6 +122,19 @@ extern "C" {
         consumed: *mut usize,
     ) -> i32;
 
+    fn qsw_v2_merge_key(
+        env: *const QswEnvelopeV2,
+        out: *mut u8,
+        cap: usize,
+    ) -> i32;
+
+    fn qsw_encode_envelope(out: *mut u8, cap: usize, env: *const QswEnvelope) -> i32;
+    fn qsw_encode_envelope_v2(
+        out: *mut u8,
+        cap: usize,
+        env: *const QswEnvelopeV2,
+    ) -> i32;
+
     fn ql_persist_open(dir_path: *const c_char, out: *mut *mut QlPersistStore) -> i32;
     fn ql_persist_close(store: *mut QlPersistStore);
     fn ql_persist_merge_blob(
@@ -207,39 +220,21 @@ pub fn run_get(store_dir: &str, key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Rebuilds the v1 merge key from a decoded v2 envelope:
-/// scopes sorted bytewise, joined with ",", then "|" + key -- the exact
-/// string v1's shim produces (ductei-qallow/src/lib.rs `encode_envelope`).
-/// This keeps the LMDB merge key identical regardless of which proto
-/// version carried the record. The wire scopes are already sorted by
-/// both encoders, but sorted again here so parity never depends on
-/// producer behavior.
+/// Rebuilds the v1 merge key from a decoded v2 envelope via the C
+/// oracle (`qsw_v2_merge_key`): scopes sorted bytewise, joined with
+/// ",", then "|" + key -- the exact string v1's shim produces
+/// (ductei-qallow/src/lib.rs `encode_envelope`). This keeps the LMDB
+/// merge key identical regardless of which proto version carried the
+/// record.
 unsafe fn merge_key_v2(env: &QswEnvelopeV2) -> Result<Vec<u8>, String> {
-    if env.scope_count as usize > QSW_MAX_SCOPES {
+    let mut out = vec![0u8; 1024]; /* QSW_MAX_KEY_LEN */
+    let n = unsafe { qsw_v2_merge_key(env, out.as_mut_ptr(), out.len()) };
+    if n < 0 {
         return Err(format!(
-            "v2 scope_count {} exceeds the C decoder cap -- nothing merged",
-            env.scope_count
+            "v2 merge-key rebuild failed: qsw_status={n} -- nothing merged"
         ));
     }
-    let mut scopes: Vec<&[u8]> = Vec::with_capacity(env.scope_count as usize);
-    for s in env.scopes.iter().take(env.scope_count as usize) {
-        scopes.push(std::slice::from_raw_parts(
-            s.data as *const u8,
-            s.len as usize,
-        ));
-    }
-    scopes.sort_unstable();
-    let key =
-        std::slice::from_raw_parts(env.key as *const u8, env.key_len as usize);
-    let mut out = Vec::new();
-    for (i, s) in scopes.iter().enumerate() {
-        if i > 0 {
-            out.push(b',');
-        }
-        out.extend_from_slice(s);
-    }
-    out.push(b'|');
-    out.extend_from_slice(key);
+    out.truncate(n as usize);
     Ok(out)
 }
 
@@ -454,4 +449,173 @@ fn ingest_frames(store: *mut QlPersistStore, frame_file: &str) -> Result<(), Str
         "ingest: {merged} envelope(s) merged, {skipped} frame(s) skipped, {offset} bytes read{version_note}"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn persist_v2_blob(data: &[u8]) -> Vec<u8> {
+        let mut b = Vec::with_capacity(24 + data.len());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&123u64.to_le_bytes());
+        b.extend_from_slice(&456u64.to_le_bytes());
+        b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        b.extend_from_slice(data);
+        b
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "qallow-task5-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&p);
+        fs::create_dir_all(&p).expect("scratch dir");
+        p
+    }
+
+    fn get_raw(store_dir: &str, key: &[u8]) -> Option<Vec<u8>> {
+        let store = open_store(store_dir).expect("open");
+        let mut buf = vec![0u8; 1 << 16];
+        let mut out_len: u32 = 0;
+        let rc = unsafe {
+            ql_persist_get(
+                store,
+                key.as_ptr() as *const c_void,
+                key.len() as u32,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+                &mut out_len,
+            )
+        };
+        unsafe { ql_persist_close(store) };
+        if rc == QLP_E_IO {
+            return None;
+        }
+        assert_eq!(rc, 0, "ql_persist_get qlp_status={rc}");
+        buf.truncate(out_len as usize);
+        Some(buf)
+    }
+
+    #[test]
+    fn v2_merge_key_matches_v1_shim() {
+        let key = b"limen.cert.j1";
+        let s0 = b"veyn,x";
+        let s1 = b"qallow.semantic.cert";
+        let mut env: QswEnvelopeV2 = unsafe { std::mem::zeroed() };
+        env.node_id = [0xAA; 16];
+        env.scope_count = 2;
+        env.scopes[0] = QswScope {
+            len: s0.len() as u16,
+            _pad: [0; 6],
+            data: s0.as_ptr() as *const c_void,
+        };
+        env.scopes[1] = QswScope {
+            len: s1.len() as u16,
+            _pad: [0; 6],
+            data: s1.as_ptr() as *const c_void,
+        };
+        env.key_len = key.len() as u32;
+        env.key = key.as_ptr() as *const c_void;
+        let shim = unsafe { merge_key_v2(&env) }.expect("shim");
+        assert_eq!(shim, b"qallow.semantic.cert,veyn,x|limen.cert.j1");
+    }
+
+    #[test]
+    fn v1_and_v2_ingest_share_lmdb_key() {
+        let blob = persist_v2_blob(b"from-v1");
+        let shim = b"qallow.semantic.cert,veyn,x|limen.cert.j1";
+        let node = [0xAAu8; 16];
+
+        let v1_env = QswEnvelope {
+            node_id: node,
+            lamport: 20,
+            schema_ver: 2,
+            flags: 0,
+            key_len: shim.len() as u32,
+            blob_len: blob.len() as u32,
+            key: shim.as_ptr() as *const c_void,
+            blob: blob.as_ptr() as *const c_void,
+        };
+        let mut v1_buf = vec![0u8; 4096];
+        let v1_n = unsafe {
+            qsw_encode_envelope(v1_buf.as_mut_ptr(), v1_buf.len(), &v1_env)
+        };
+        assert!(v1_n > 0);
+        v1_buf.truncate(v1_n as usize);
+
+        let blob2 = persist_v2_blob(b"from-v2");
+        let key = b"limen.cert.j1";
+        let s0 = b"veyn,x";
+        let s1 = b"qallow.semantic.cert";
+        let mut v2_env: QswEnvelopeV2 = unsafe { std::mem::zeroed() };
+        v2_env.node_id = [0xBB; 16];
+        v2_env.lamport = 21;
+        v2_env.schema_ver = 2;
+        v2_env.scope_count = 2;
+        v2_env.scopes[0] = QswScope {
+            len: s0.len() as u16,
+            _pad: [0; 6],
+            data: s0.as_ptr() as *const c_void,
+        };
+        v2_env.scopes[1] = QswScope {
+            len: s1.len() as u16,
+            _pad: [0; 6],
+            data: s1.as_ptr() as *const c_void,
+        };
+        v2_env.key_len = key.len() as u32;
+        v2_env.key = key.as_ptr() as *const c_void;
+        v2_env.blob_len = blob2.len() as u32;
+        v2_env.blob = blob2.as_ptr() as *const c_void;
+        let mut v2_buf = vec![0u8; 4096];
+        let v2_n = unsafe {
+            qsw_encode_envelope_v2(v2_buf.as_mut_ptr(), v2_buf.len(), &v2_env)
+        };
+        assert!(v2_n > 0);
+        v2_buf.truncate(v2_n as usize);
+
+        let dir_v1 = scratch("v1");
+        let frames_v1 = dir_v1.join("frames.qsw");
+        fs::write(&frames_v1, &v1_buf).unwrap();
+        run(dir_v1.to_str().unwrap(), frames_v1.to_str().unwrap()).unwrap();
+        assert_eq!(
+            get_raw(dir_v1.to_str().unwrap(), shim).as_deref(),
+            Some(b"from-v1".as_ref())
+        );
+
+        let dir_v2 = scratch("v2");
+        let frames_v2 = dir_v2.join("frames.qsw");
+        fs::write(&frames_v2, &v2_buf).unwrap();
+        run(dir_v2.to_str().unwrap(), frames_v2.to_str().unwrap()).unwrap();
+        assert_eq!(
+            get_raw(dir_v2.to_str().unwrap(), shim).as_deref(),
+            Some(b"from-v2".as_ref())
+        );
+
+        /* malformed v2: corrupt scope_len, reject before any write. */
+        let dir_bad = scratch("bad");
+        let mut bad = v2_buf.clone();
+        /* body starts at offset 5; scope[0] len is at 5+30 */
+        bad[5 + 30] = 0xFF;
+        bad[5 + 31] = 0xFF;
+        let frames_bad = dir_bad.join("frames.qsw");
+        fs::write(&frames_bad, &bad).unwrap();
+        let err = run(dir_bad.to_str().unwrap(), frames_bad.to_str().unwrap())
+            .expect_err("malformed v2 must fail closed");
+        assert!(err.contains("malformed"), "{err}");
+        assert!(get_raw(dir_bad.to_str().unwrap(), shim).is_none());
+
+        let _ = fs::remove_dir_all(&dir_v1);
+        let _ = fs::remove_dir_all(&dir_v2);
+        let _ = fs::remove_dir_all(&dir_bad);
+    }
 }

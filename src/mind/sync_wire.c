@@ -184,32 +184,40 @@ static int scope_cmp(const void *a, const void *b) {
     return (int)sa->len - (int)sb->len;
 }
 
+/* Validate env->scopes, copy into out[0..scope_count), sort bytewise. */
+static qsw_status copy_sort_scopes(const qsw_envelope_v2 *env,
+                                   qsw_scope *out) {
+    if (env->scope_count > QSW_MAX_SCOPES) return QSW_E_ARG;
+    for (uint16_t i = 0; i < env->scope_count; i++) {
+        if (!env->scopes[i].data || env->scopes[i].len > QSW_MAX_SCOPE_LEN)
+            return QSW_E_ARG;
+        out[i] = env->scopes[i];
+    }
+    for (uint16_t i = 1; i < env->scope_count; i++) { /* insertion sort */
+        qsw_scope s = out[i];
+        uint16_t j = i;
+        while (j > 0 && scope_cmp(&out[j - 1], &s) > 0) {
+            out[j] = out[j - 1];
+            j--;
+        }
+        out[j] = s;
+    }
+    return QSW_OK;
+}
+
 int32_t qsw_encode_envelope_v2(uint8_t *out, size_t cap,
                                const qsw_envelope_v2 *env) {
     if (!out || !env || !env->key || (env->blob_len && !env->blob))
         return QSW_E_ARG;
     if (env->key_len == 0 || env->key_len > QSW_MAX_KEY_LEN) return QSW_E_ARG;
     if (env->blob_len > QSW_MAX_BLOB_LEN) return QSW_E_TOO_BIG;
-    if (env->scope_count > QSW_MAX_SCOPES) return QSW_E_ARG;
 
-    /* Validate + size scopes, then sort a scratch copy for the wire. */
     qsw_scope scopes[QSW_MAX_SCOPES];
+    qsw_status st = copy_sort_scopes(env, scopes);
+    if (st != QSW_OK) return st;
     uint32_t scope_bytes = 0;
-    for (uint16_t i = 0; i < env->scope_count; i++) {
-        if (!env->scopes[i].data || env->scopes[i].len > QSW_MAX_SCOPE_LEN)
-            return QSW_E_ARG;
-        scopes[i] = env->scopes[i];
-        scope_bytes += 2u + env->scopes[i].len;
-    }
-    for (uint16_t i = 1; i < env->scope_count; i++) { /* insertion sort */
-        qsw_scope s = scopes[i];
-        uint16_t j = i;
-        while (j > 0 && scope_cmp(&scopes[j - 1], &s) > 0) {
-            scopes[j] = scopes[j - 1];
-            j--;
-        }
-        scopes[j] = s;
-    }
+    for (uint16_t i = 0; i < env->scope_count; i++)
+        scope_bytes += 2u + scopes[i].len;
 
     uint32_t body = QSW_ENV_V2_FIXED + scope_bytes +
                     8u + env->key_len + env->blob_len;
@@ -325,4 +333,32 @@ qsw_status qsw_hello_validate_v2(const qsw_hello *h) {
     if (h->magic != QSW_MAGIC) return QSW_E_MAGIC;
     if (h->proto_ver != QSW_PROTO_VER_V2) return QSW_E_VERSION;
     return QSW_OK;
+}
+
+int32_t qsw_v2_merge_key(const qsw_envelope_v2 *env,
+                         uint8_t *out, size_t cap) {
+    if (!env || !out) return QSW_E_ARG;
+    if (!env->key && env->key_len) return QSW_E_ARG;
+
+    qsw_scope scopes[QSW_MAX_SCOPES];
+    qsw_status st = copy_sort_scopes(env, scopes);
+    if (st != QSW_OK) return st;
+
+    uint64_t need = 1ull + (uint64_t)env->key_len; /* '|' + key */
+    for (uint16_t i = 0; i < env->scope_count; i++) {
+        if (i) need += 1ull; /* comma */
+        need += scopes[i].len;
+    }
+    if (need > QSW_MAX_KEY_LEN) return QSW_E_TOO_BIG;
+    if (need > cap) return QSW_E_SPACE;
+
+    size_t o = 0;
+    for (uint16_t i = 0; i < env->scope_count; i++) {
+        if (i) out[o++] = ',';
+        memcpy(out + o, scopes[i].data, scopes[i].len);
+        o += scopes[i].len;
+    }
+    out[o++] = '|';
+    if (env->key_len) memcpy(out + o, env->key, env->key_len);
+    return (int32_t)need;
 }

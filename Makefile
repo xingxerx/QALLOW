@@ -20,10 +20,12 @@ test: $(TESTS)
 $(BUILDDIR)/test_sync_wire: src/mind/sync_wire.c tests/test_sync_wire.c include/qallow/sync_wire.h | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(CPPFLAGS) src/mind/sync_wire.c tests/test_sync_wire.c -o $@
 
-$(BUILDDIR)/test_persist_lmdb: src/mind/persist_lmdb.c tests/test_persist_lmdb.c \
+$(BUILDDIR)/test_persist_lmdb: src/mind/persist_lmdb.c src/mind/sync_wire.c \
+		tests/test_persist_lmdb.c \
 		include/qallow/persist_lmdb.h include/qallow/sync_wire.h \
 		third_party/lmdb/mdb.c third_party/lmdb/midl.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) src/mind/persist_lmdb.c tests/test_persist_lmdb.c \
+	$(CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) src/mind/persist_lmdb.c src/mind/sync_wire.c \
+		tests/test_persist_lmdb.c \
 		third_party/lmdb/mdb.c third_party/lmdb/midl.c -o $@
 
 $(BUILDDIR):
@@ -44,12 +46,15 @@ $(BUILDDIR_AARCH64)/test_sync_wire: src/mind/sync_wire.c tests/test_sync_wire.c 
 	$(AARCH64_CC) $(CFLAGS) $(CPPFLAGS) -c tests/test_sync_wire.c -o $(BUILDDIR_AARCH64)/test_sync_wire.o
 	$(AARCH64_CC) $(CFLAGS) $(CPPFLAGS) $(BUILDDIR_AARCH64)/sync_wire.o $(BUILDDIR_AARCH64)/test_sync_wire.o -o $@
 
-$(BUILDDIR_AARCH64)/test_persist_lmdb: src/mind/persist_lmdb.c tests/test_persist_lmdb.c \
+$(BUILDDIR_AARCH64)/test_persist_lmdb: src/mind/persist_lmdb.c src/mind/sync_wire.c \
+		tests/test_persist_lmdb.c \
 		include/qallow/persist_lmdb.h include/qallow/sync_wire.h \
 		third_party/lmdb/mdb.c third_party/lmdb/midl.c | $(BUILDDIR_AARCH64)
 	$(AARCH64_CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) -c src/mind/persist_lmdb.c -o $(BUILDDIR_AARCH64)/persist_lmdb.o
+	$(AARCH64_CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) -c src/mind/sync_wire.c -o $(BUILDDIR_AARCH64)/sync_wire_persist.o
 	$(AARCH64_CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) -c tests/test_persist_lmdb.c -o $(BUILDDIR_AARCH64)/test_persist_lmdb.o
 	$(AARCH64_CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) -c third_party/lmdb/mdb.c -o $(BUILDDIR_AARCH64)/mdb.o
 	$(AARCH64_CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) -c third_party/lmdb/midl.c -o $(BUILDDIR_AARCH64)/midl.o
-	$(AARCH64_CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) $(BUILDDIR_AARCH64)/persist_lmdb.o $(BUILDDIR_AARCH64)/test_persist_lmdb.o \
+	$(AARCH64_CC) $(CFLAGS) $(LMDB_CFLAGS) $(CPPFLAGS) $(BUILDDIR_AARCH64)/persist_lmdb.o \
+		$(BUILDDIR_AARCH64)/sync_wire_persist.o $(BUILDDIR_AARCH64)/test_persist_lmdb.o \
 		$(BUILDDIR_AARCH64)/mdb.o $(BUILDDIR_AARCH64)/midl.o -o $@
