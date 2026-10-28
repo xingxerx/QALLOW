@@ -202,6 +202,15 @@ qsw_status qsw_decode_v2_envelope_body(const uint8_t *body, size_t body_len,
 /* Handshake validation for v2: magic + proto_ver == QSW_PROTO_VER_V2. */
 qsw_status qsw_hello_validate_v2(const qsw_hello *h);
 
+/* Rebuild the v1 merge key from a decoded v2 envelope: scopes sorted
+ * bytewise, joined with ",", then "|" + key. This is the string v1's
+ * shim produces (DUCTEI encode_envelope), so a record lands under the
+ * same LMDB key in either proto version. Returns bytes written (no
+ * NUL), or a negative qsw_status. The result is never larger than
+ * QSW_MAX_KEY_LEN (persist's key cap). */
+int32_t qsw_v2_merge_key(const qsw_envelope_v2 *env,
+                         uint8_t *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
