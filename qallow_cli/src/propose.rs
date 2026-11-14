@@ -15,9 +15,12 @@
 //! - Idempotent: the job id is derived from the LMDB key, and a request
 //!   already present in pending/, done/, certs/ or failed/ is never
 //!   re-proposed (no punitive retries; failed/ is an archive).
-//! - Credentials never in payloads: the request is `offline: true` and
-//!   carries no token; limend reads QPU credentials from its own
-//!   environment only.
+//! - Credentials never in payloads: the request is `offline: true` by
+//!   default and carries no token; limend reads QPU credentials from its
+//!   own environment only. `--online` (opt-in, per call) flips only the
+//!   `offline` field so limend may route to hardware; the payload still
+//!   carries no credential, and limend fails the job if its own env has
+//!   no token.
 //!
 //! The QUBO itself is deliberately the smallest real problem LIMEN's
 //! offline simulator path certifies (two variables, one coupling). It is
@@ -132,8 +135,9 @@ fn already_present(spool: &Path, job_id: &str) -> Option<PathBuf> {
     None
 }
 
-fn request_json(job_id: &str, origin_key: &str, fidelity_target: f64, credit_budget: f64) -> String {
+fn request_json(job_id: &str, origin_key: &str, fidelity_target: f64, credit_budget: f64, online: bool) -> String {
     let origin = origin_key.replace('\\', "\\\\").replace('"', "\\\"");
+    let offline = if online { "false" } else { "true" };
     format!(
         concat!(
             "{{\n",
@@ -141,15 +145,22 @@ fn request_json(job_id: &str, origin_key: &str, fidelity_target: f64, credit_bud
             "  \"qubo\": [[[\"a\", \"a\"], -1.0], [[\"b\", \"b\"], -1.0], [[\"a\", \"b\"], 2.0]],\n",
             "  \"fidelity_target\": {},\n",
             "  \"credit_budget\": {},\n",
-            "  \"offline\": true,\n",
+            "  \"offline\": {},\n",
             "  \"origin\": {{\"store_key\": \"{}\", \"cue\": \"rem_detected\"}}\n",
             "}}\n"
         ),
-        job_id, fidelity_target, credit_budget, origin
+        job_id, fidelity_target, credit_budget, offline, origin
     )
 }
 
-pub fn run(store_dir: &str, key: &str, spool_dir: &str, fidelity_target: f64, credit_budget: f64) -> Result<(), String> {
+pub fn run(
+    store_dir: &str,
+    key: &str,
+    spool_dir: &str,
+    fidelity_target: f64,
+    credit_budget: f64,
+    online: bool,
+) -> Result<(), String> {
     let spool = Path::new(spool_dir);
     let pending = spool.join("pending");
     if !pending.is_dir() {
@@ -185,7 +196,7 @@ pub fn run(store_dir: &str, key: &str, spool_dir: &str, fidelity_target: f64, cr
         return Ok(());
     }
 
-    let body = request_json(&job_id, key, fidelity_target, credit_budget);
+    let body = request_json(&job_id, key, fidelity_target, credit_budget, online);
     let tmp = pending.join(format!(".{job_id}.json.tmp"));
     let dest = pending.join(format!("{job_id}.json"));
     fs::write(&tmp, body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
@@ -223,9 +234,20 @@ mod tests {
 
     #[test]
     fn request_is_offline_and_carries_no_credential_fields() {
-        let r = request_json("j", "k", 0.9, 10.0);
+        let r = request_json("j", "k", 0.9, 10.0, false);
         assert!(r.contains("\"offline\": true"));
         assert!(!r.contains("token"));
         assert!(!r.contains("api_"));
+    }
+
+    #[test]
+    fn online_request_flips_only_offline_and_still_carries_no_credentials() {
+        let off = request_json("j", "k", 0.9, 10.0, false);
+        let on = request_json("j", "k", 0.9, 10.0, true);
+        assert!(on.contains("\"offline\": false"));
+        assert_eq!(on.replace("\"offline\": false", "\"offline\": true"), off);
+        assert!(!on.contains("token"));
+        assert!(!on.contains("api_"));
+        assert!(!on.contains("crn"));
     }
 }
